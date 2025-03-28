@@ -20,28 +20,25 @@ type Resolver struct {
 }
 
 // NewResolver creates a new Resolver starting from the given root server (e.g., "198.41.0.4:53").
-func NewResolver(root string, debugLog bool) (*Resolver, error) {
-	r := &Resolver{
-		client:   &dns.Client{},
-		root:     root,
-		DebugLog: debugLog,
-	}
+func NewResolver(root string, debugLog bool) (r *Resolver, err error) {
 	cookie := make([]byte, 8)
-	if _, err := rand.Read(cookie); err != nil {
-		return nil, err
+	if _, err = rand.Read(cookie); err == nil {
+		r = &Resolver{
+			client:       &dns.Client{},
+			root:         root,
+			DebugLog:     debugLog,
+			clientCookie: hex.EncodeToString(cookie),
+		}
 	}
-	r.clientCookie = hex.EncodeToString(cookie)
-	return r, nil
+	return
 }
 
 // Lookup performs a recursive DNS lookup with delegation handling and CNAME resolution.
 func (r *Resolver) Lookup(name string, qtype uint16) (*dns.Msg, error) {
-	finalMsg := new(dns.Msg)
-	visited := map[string]struct{}{}
-	return r.lookup(name, qtype, visited, finalMsg)
+	return r.lookup(name, qtype, map[string]struct{}{})
 }
 
-func (r *Resolver) lookup(name string, qtype uint16, visited map[string]struct{}, finalMsg *dns.Msg) (*dns.Msg, error) {
+func (r *Resolver) lookup(name string, qtype uint16, visited map[string]struct{}) (*dns.Msg, error) {
 	name = strings.ToLower(dns.Fqdn(name))
 	if _, ok := visited[name]; ok {
 		return nil, errors.New("loop detected")
@@ -70,12 +67,9 @@ func (r *Resolver) lookup(name string, qtype uint16, visited map[string]struct{}
 			}
 
 			if len(response.Answer) > 0 {
-				for _, ans := range response.Answer {
-					finalMsg.Answer = append(finalMsg.Answer, ans)
-					if cname, ok := ans.(*dns.CNAME); ok {
-						return r.lookup(cname.Target, qtype, visited, finalMsg)
-					}
-				}
+				finalMsg := new(dns.Msg)
+				finalMsg.SetQuestion(name, qtype)
+				finalMsg.Answer = r.lookupResult(response.Answer, qtype, visited)
 				return finalMsg, nil
 			}
 
@@ -99,6 +93,21 @@ func (r *Resolver) lookup(name string, qtype uint16, visited map[string]struct{}
 		currentServers = nextServers
 	}
 	return nil, errors.New("maximum recursion depth reached")
+}
+
+func (r *Resolver) lookupResult(answers []dns.RR, qtype uint16, visited map[string]struct{}) (result []dns.RR) {
+	for _, ans := range answers {
+		result = append(result, ans)
+		if cname, ok := ans.(*dns.CNAME); ok {
+			msg, err := r.lookup(cname.Target, qtype, visited)
+			if err == nil {
+				for _, ans := range msg.Answer {
+					result = append(result, ans)
+				}
+			}
+		}
+	}
+	return
 }
 
 func extractGlue(msg *dns.Msg) []string {
